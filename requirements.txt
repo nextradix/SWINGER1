@@ -2,5 +2,5 @@ streamlit
 yfinance
 pandas
 numpy
-pandas-ta
 plotly
+https://github.com/twopirllc/pandas-ta/archive/refs/heads/development.zip
