@@ -725,12 +725,16 @@ with tab3:
         else:
             st.warning(f"🟡 **Nifty 50 Market Status: CAUTION / SIDEWAYS** | Price: ₹{nifty_details.get('price', 0):,.2f}\n\n*Selectively trade only the highest quality (A+) setups.*")
 
-        # Load NIFTY 500
         try:
-            nifty_df = pd.read_csv("k:/PYTHON PROJECTS/SWING TRADING/nifty500.csv")
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_csv = os.path.join(base_dir, "nifty500.csv")
+            nifty_df = pd.read_csv(local_csv if os.path.exists(local_csv) else "k:/PYTHON PROJECTS/SWING TRADING/nifty500.csv")
             nifty_500 = nifty_df['Symbol'].tolist()
-        except FileNotFoundError:
-            st.error("nifty500.csv not found! Using fallback list.")
+        except Exception as e:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_csv = os.path.join(base_dir, "nifty500.csv")
+            print(f"DEBUG ERROR: Failed to load nifty500.csv. Path checked: {local_csv}. FileExists: {os.path.exists(local_csv)}. Exception: {e}")
+            st.error(f"Error loading nifty500.csv: {e}")
             nifty_500 = [
                 "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC", 
                 "KOTAKBANK", "LT", "AXISBANK", "HUL", "TATAMOTORS", "MARUTI", "SUNPHARMA"
@@ -1022,10 +1026,15 @@ with tab6:
     if scan_btn or quick_btn:
         # Load stock list
         try:
-            nifty_df = pd.read_csv("k:/PYTHON PROJECTS/SWING TRADING/nifty500.csv")
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_csv = os.path.join(base_dir, "nifty500.csv")
+            nifty_df = pd.read_csv(local_csv if os.path.exists(local_csv) else "k:/PYTHON PROJECTS/SWING TRADING/nifty500.csv")
             stock_list = nifty_df['Symbol'].tolist()
-        except FileNotFoundError:
-            st.error("nifty500.csv not found!")
+        except Exception as e:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_csv = os.path.join(base_dir, "nifty500.csv")
+            print(f"DEBUG ERROR: Failed to load nifty500.csv. Path checked: {local_csv}. FileExists: {os.path.exists(local_csv)}. Exception: {e}")
+            st.error(f"Error loading nifty500.csv: {e}")
             stock_list = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN",
                           "BHARTIARTL", "ITC", "KOTAKBANK", "LT", "AXISBANK", "HUL",
                           "TATAMOTORS", "MARUTI", "SUNPHARMA"]
