@@ -679,20 +679,22 @@ with tab3:
     strategy_mode = st.radio("Select Strategy Mode:", ["🚀 Momentum Breakouts", "🛡️ Pullbacks to Support"], horizontal=True, key="screener_strategy_mode")
 
     # Dynamic controls
-    require_trend = True
-    min_vol_ratio = 1.5
-    require_squeeze = False
+    use_trend_flt = True
+    use_vol_spike = True
+    use_wick_flt = True
+    use_squeeze = False
     
     with st.expander("🛠️ Scan & Filter Configuration Parameters", expanded=False):
-        c1, c2, c3 = st.columns(3)
         if strategy_mode == "🚀 Momentum Breakouts":
+            c1, c2 = st.columns(2)
             with c1:
-                require_trend = st.checkbox("Strict Weekly Trend Filter (Close > 10w & 40w EMA)", value=True, key="cfg_require_trend")
+                use_trend_flt = st.checkbox("Enable Trend Filter (Close > 40w EMA)", value=True, key="cfg_use_trend_flt", help="Only take breakouts when in a primary weekly uptrend above the 40-week EMA")
+                use_vol_spike = st.checkbox("Enable Volume Spike Filter (T-1 Vol > 1.3x MA)", value=True, key="cfg_use_vol_spike", help="Breakout volume must be at least 1.3x of 20-week volume average")
             with c2:
-                min_vol_ratio = st.slider("Minimum Breakout Volume Spike (x of 20w MA)", 1.0, 3.0, 1.5, 0.1, key="cfg_min_vol")
-            with c3:
-                require_squeeze = st.checkbox("Require Bollinger Band Squeeze in consolidation", value=False, key="cfg_require_squeeze")
+                use_wick_flt = st.checkbox("Enable Wick Rejection Filter (T-1 Upper Wick < 35%)", value=True, key="cfg_use_wick_flt", help="Filter out weekly breakouts with heavy rejection wicks at the high")
+                use_squeeze = st.checkbox("Require BB Squeeze in Consolidation Window", value=False, key="cfg_use_squeeze", help="Requires Bollinger Bands to contract inside Keltner Channels during consolidation")
         else:
+            c1, c2, c3 = st.columns(3)
             with c1:
                 st.write("**Support Proximity:**")
                 st.caption("Price must be within -1.5% to +4.0% of the 40-week EMA or 20-week SMA.")
@@ -753,9 +755,10 @@ with tab3:
                     if strategy_mode == "🚀 Momentum Breakouts":
                         is_match, details, price = ae.analyze_screener_strategy(
                             df, market_regime=nifty_status, 
-                            require_trend=require_trend, 
-                            min_vol_ratio=min_vol_ratio, 
-                            require_squeeze=require_squeeze
+                            use_trend_flt=use_trend_flt, 
+                            use_vol_spike=use_vol_spike, 
+                            use_wick_flt=use_wick_flt, 
+                            use_squeeze=use_squeeze
                         )
                     else:
                         is_match, details, price = ae.analyze_pullback_strategy(df, market_regime=nifty_status)
