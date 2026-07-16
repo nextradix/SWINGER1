@@ -646,23 +646,19 @@ def get_nifty_market_regime():
         return "UNKNOWN", {'error': str(e)}
 
 
-def analyze_screener_strategy(df, market_regime="BULLISH", require_trend=True, min_vol_ratio=1.5, require_squeeze=False):
+def analyze_screener_strategy(df, market_regime="BULLISH", use_trend_flt=True, use_vol_spike=True, use_wick_flt=True, use_squeeze=False):
     """
-    Implements the advanced, low-error swing trading screener strategy:
-    1. Trend Filter: Weekly Close must be above both 10-week and 40-week EMAs (optional).
-    2. Consolidation: 4 Weeks (T-6 to T-3) of price stability (drop <= 2%) and volume contraction.
-    3. Momentum: 2 Weeks (T-2 to T-1) of volume build-up with T-1 Close > BB Upper.
-    4. Confirmation: Week T Close > T-1 Close and Close > Open (Green).
-    5. Volatility Squeeze: Checks for active Bollinger Band Squeeze (BB inside KC) in lookback (optional).
-    6. Volume Spike: Enforces breakout week (T-1) volume >= min_vol_ratio x of 20-week Volume MA.
-    
-    Returns:
-        is_match (bool): True if pattern matched and passes filters
-        details (dict): Dict of trade parameters (grade, trigger, stop loss, targets) or error message
-        price (float): Current price
+    Implements the Improved Swing Breakout Strategy (Weekly):
+    1. Consolidation (T-6 to T-3): Volume contraction and price stability (drop <= 2%).
+    2. Momentum Buildup (T-2 to T-1): Volume increase (T-1 > T-2 > T-3) and BB Breakout at T-1 (Close > Upper BB).
+    3. Confirmation (Current T): Close > Open (Green) and Close > Close[1].
+    4. Trend Filter (Optional): Close > 40-week EMA.
+    5. Volume Spike (Optional): T-1 volume > 1.3x 20-week Volume MA.
+    6. Wick Rejection Filter (Optional): T-1 Upper Wick < 35% of total range.
+    7. Bollinger Band Squeeze (Optional): Require BB squeeze in consolidation window.
     """
     try:
-        # Ensure we have enough data for 40-week EMA and Keltner Channel
+        # Ensure we have enough data for 40-week EMA and indicators
         if len(df) < 45:
             return False, {"msg": "Insufficient data (need >= 45 weekly bars)"}, 0
 
@@ -677,8 +673,10 @@ def analyze_screener_strategy(df, market_regime="BULLISH", require_trend=True, m
             return False, {"msg": "Bollinger Bands calculation failed"}, 0
         bbu_col = next((c for c in bb.columns if c.startswith("BBU")), None)
         bbl_col = next((c for c in bb.columns if c.startswith("BBL")), None)
+        bbm_col = next((c for c in bb.columns if c.startswith("BBM")), None)
         df['BB_Upper'] = bb[bbu_col]
         df['BB_Lower'] = bb[bbl_col]
+        df['BB_Mid'] = bb[bbm_col] if bbm_col else df['Close'].rolling(20).mean()
         
         # Keltner Channel (20, 1.5 x ATR)
         atr = ta.atr(df['High'], df['Low'], df['Close'], length=20)
@@ -694,97 +692,107 @@ def analyze_screener_strategy(df, market_regime="BULLISH", require_trend=True, m
         df['Vol_MA'] = ta.sma(df['Volume'], length=20)
 
         # Slice last 7 weeks
-        subset = df.iloc[-7:]
-        current_price = df.iloc[-1]['Close']
-        
-        if len(subset) < 7:
-            return False, {"msg": "Not enough recent weekly data"}, current_price
+        if len(df) < 7:
+            return False, {"msg": "Not enough recent weekly data"}, df.iloc[-1]['Close']
 
         # Assign Rows
         w_curr = df.iloc[-1]   # T
         w_last = df.iloc[-2]   # T-1
         w_prev = df.iloc[-3]   # T-2
-        cons_window = subset.iloc[0:4] # T-6 to T-3
+        cons_window = df.iloc[-7:-3] # T-6 to T-3
 
-        # === 1. TREND FILTER ===
-        # Price must be above both 10-week and 40-week EMAs on both breakout week (T-1) and current week (T)
-        trend_aligned = (w_curr['Close'] > w_curr['EMA_10']) and (w_curr['Close'] > w_curr['EMA_40']) and \
-                         (w_last['Close'] > w_last['EMA_10']) and (w_last['Close'] > w_last['EMA_40'])
-        if require_trend and not trend_aligned:
-            return False, {"msg": "Trend filter failed: Close below 10-week or 40-week EMA"}, current_price
+        current_price = w_curr['Close']
 
-        # === 2. VOLUME SPIKE VALIDATION ===
-        # Breakout volume (T-1) must be >= min_vol_ratio x of the 20-week volume MA
-        vol_ratio = w_last['Volume'] / w_last['Vol_MA'] if w_last['Vol_MA'] > 0 else 0
-        if vol_ratio < min_vol_ratio:
-            return False, {"msg": f"Volume spike too weak: {vol_ratio:.2f}x (required >= {min_vol_ratio:.1f}x)"}, current_price
+        # === CORE SWING BREAKOUT LOGIC (screener.pine) ===
+        
+        # 1. Consolidation (T-6 to T-3)
+        vols = cons_window['Volume'].values
+        vol_first_half = (vols[0] + vols[1]) / 2.0
+        vol_last_half = (vols[2] + vols[3]) / 2.0
+        is_vol_falling = vol_last_half < vol_first_half
+        
+        prices = cons_window['Close'].values
+        price_change = (prices[3] - prices[0]) / prices[0]
+        is_price_stable = price_change > -0.02
+        
+        condition_1 = is_vol_falling and is_price_stable
+        if not condition_1:
+            return False, {"msg": f"Consolidation check failed: Vol falling: {is_vol_falling}, Price change: {price_change*100:.1f}%"}, current_price
 
-        # === 3. WEEK T CONFIRMATION ===
-        is_green = w_curr['Close'] > w_curr['Open']
-        is_above_last_week = w_curr['Close'] > w_last['Close']
-        if not (is_green and is_above_last_week):
-            return False, {"msg": "Week T confirmation failed: Not green or below T-1 close"}, current_price
-
-        # === 4. MOMENTUM SETUP (T-1, T-2) ===
-        vol_incr_1 = w_last['Volume'] > w_prev['Volume']
-        vol_incr_2 = w_prev['Volume'] > cons_window.iloc[-1]['Volume'] # T-2 > T-3
+        # 2. Momentum Buildup (T-2 to T-1)
+        vol_increase = (w_last['Volume'] > w_prev['Volume']) and (w_prev['Volume'] > vols[3])
         bb_breakout = w_last['Close'] > w_last['BB_Upper']
         
-        if not (vol_incr_1 and vol_incr_2):
-            return False, {"msg": "No consecutive volume increase in momentum phase"}, current_price
-        if not bb_breakout:
-            return False, {"msg": "T-1 Close did not break above Upper Bollinger Band"}, current_price
+        condition_2 = vol_increase and bb_breakout
+        if not condition_2:
+            return False, {"msg": f"Momentum buildup failed: Vol increase: {vol_increase}, BB Breakout: {bb_breakout}"}, current_price
 
-        # === 5. CONSOLIDATION FILTER (T-6 to T-3) ===
-        # Volume falling check
-        vols = cons_window['Volume'].values
-        vol_first_half = vols[:2].mean()
-        vol_last_half = vols[2:].mean()
-        is_vol_falling = vol_last_half < vol_first_half
-        if not is_vol_falling:
-            return False, {"msg": "Volume not falling during consolidation phase"}, current_price
-
-        # Price stable check
-        prices = cons_window['Close'].values
-        price_change = (prices[-1] - prices[0]) / prices[0]
-        if price_change < -0.02:
-            return False, {"msg": f"Price fell too much during consolidation ({price_change*100:.1f}%)"}, current_price
-
-        # === 6. SQUEEZE DETECTION (T-10 to T-2) ===
-        # Count how many weeks of Bollinger Band Squeeze occurred in recent history
-        squeeze_weeks = int(df['Squeeze'].iloc[-10:-2].sum())
-        has_squeeze_history = squeeze_weeks >= 1
+        # 3. Confirmation (Current T)
+        is_green = w_curr['Close'] > w_curr['Open']
+        is_above_prev = w_curr['Close'] > w_last['Close']
         
-        if require_squeeze and not has_squeeze_history:
-            return False, {"msg": "Squeeze history filter failed: No squeeze active in consolidation window"}, current_price
+        condition_3 = is_green and is_above_prev
+        if not condition_3:
+            return False, {"msg": f"Weekly confirmation failed: Green: {is_green}, Above prev Close: {is_above_prev}"}, current_price
 
-        # === 7. TRADE PARAMETERS CALCULATION ===
-        # Trigger entry is the High of the breakout week (T-1)
-        trigger_price = w_last['High']
+        # === EXPERT FILTERS ===
+
+        # Filter A: Trend Filter
+        trend_ok = True
+        if use_trend_flt:
+            trend_ok = (w_last['Close'] > w_last['EMA_40']) and (w_curr['Close'] > w_curr['EMA_40'])
+        if not trend_ok:
+            return False, {"msg": "Trend filter failed: Close below 40-week EMA"}, current_price
+
+        # Filter B: Volume Spike
+        vol_ratio = w_last['Volume'] / w_last['Vol_MA'] if w_last['Vol_MA'] > 0 else 0.0
+        vol_spike_ok = True
+        if use_vol_spike:
+            vol_spike_ok = vol_ratio > 1.3
+        if not vol_spike_ok:
+            return False, {"msg": f"Volume spike filter failed: {vol_ratio:.2f}x (required > 1.3x)"}, current_price
+
+        # Filter C: Wick Rejection (No large upper wick on breakout week T-1)
+        breakout_range = w_last['High'] - w_last['Low']
+        breakout_body_high = max(w_last['Open'], w_last['Close'])
+        breakout_upper_wick = w_last['High'] - breakout_body_high
+        wick_ok = True
+        if use_wick_flt and breakout_range > 0:
+            wick_ok = (breakout_upper_wick / breakout_range) <= 0.35
+        if not wick_ok:
+            return False, {"msg": f"Wick filter failed: Upper wick is {breakout_upper_wick/breakout_range:.1%} of candle range"}, current_price
+
+        # Filter D: Squeeze during consolidation window (T-6 to T-3)
+        squeeze_count = int(df['Squeeze'].iloc[-7:-3].sum())
+        squeeze_ok = True
+        if use_squeeze:
+            squeeze_ok = squeeze_count >= 1
+        if not squeeze_ok:
+            return False, {"msg": "Squeeze filter failed: No squeeze active during consolidation phase"}, current_price
+
+        # === TRADE PARAMETERS ===
+        # Entry price is current weekly close
+        trigger_price = current_price
         
-        # Stop Loss is 0.5% below the Low of the breakout week (T-1)
+        # Stop loss: 0.5% below breakout low
         stop_loss = w_last['Low'] * 0.995
         
-        # Prevent zero division or negative risk
+        # Risk protection
         risk = trigger_price - stop_loss
         if risk <= 0:
-            risk = trigger_price * 0.02 # Fallback: 2% risk
+            risk = trigger_price * 0.02
             stop_loss = trigger_price - risk
             
         target_1 = trigger_price + 2 * risk
         target_2 = trigger_price + 3 * risk
         
-        # Check if trade has already triggered this week
-        triggered_this_week = w_curr['High'] >= trigger_price
-        
-        # === 8. SETUP GRADING ===
-        # Grade A+: Market is Bullish, Squeeze was active, Volume Spike >= 2.0x
-        # Grade A: Market is Bullish/Caution, Volume Spike >= 1.5x
-        # Grade B: Market is Bearish/Caution OR no squeeze active, but trend and volume spike are good
-        if market_regime == "BULLISH" and has_squeeze_history and vol_ratio >= 2.0:
+        triggered_this_week = True
+
+        # === SETUP GRADING ===
+        if market_regime == "BULLISH" and squeeze_count >= 1 and vol_ratio >= 1.5:
             grade = "A+"
             grade_desc = "A+ (Ultra High Conviction: Volatility Squeeze + Heavy Volume + Bull Market)"
-        elif market_regime in ["BULLISH", "CAUTION"] and (has_squeeze_history or vol_ratio >= 1.5):
+        elif market_regime in ["BULLISH", "CAUTION"] and (squeeze_count >= 1 or vol_ratio >= 1.3):
             grade = "A"
             grade_desc = "A (High Conviction: Strong Breakout & Trend Alignment)"
         else:
@@ -802,7 +810,7 @@ def analyze_screener_strategy(df, market_regime="BULLISH", require_trend=True, m
             'target_2': target_2,
             'risk_price': risk,
             'vol_ratio': vol_ratio,
-            'squeeze_weeks': squeeze_weeks,
+            'squeeze_weeks': squeeze_count,
             'triggered': triggered_this_week,
             'current_price': current_price,
             'ema10': w_curr['EMA_10'],
